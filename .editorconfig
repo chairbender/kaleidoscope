@@ -1,0 +1,26 @@
+# top-most EditorConfig file
+root = true
+
+# All files
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 120
+
+# C/C++ source files
+[*.{c,cpp,cxx,cc,h,hpp,hxx,hh,inl,ipp,ixx,cppm}]
+indent_style = space
+indent_size = 2
+tab_width = 2
+
+# Meson
+[{meson.build,meson.options}]
+indent_style = space
+indent_size = 2
+tab_width = 2
+
+# Markdown files
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = off
