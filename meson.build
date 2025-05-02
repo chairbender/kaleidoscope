@@ -9,7 +9,7 @@ sources = [
   'src/main.cpp'
 ]
 deps = []
-cpp_args = ['-std=c++2c']
+cpp_args = ['-std=c++2c', '-Wall', '-Wextra', '-Wshadow', '-Wconversion', '-Wpedantic', '-Werror']
 link_args = []
 
 # build targeting the native system this was built on. If buildtype is debug,

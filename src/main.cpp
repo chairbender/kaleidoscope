@@ -9,7 +9,7 @@
 #include <format>
 #include <unordered_map>
 
-using std::string, std::cin, std::move, std::unique_ptr, std::vector, std::unordered_map, std::cerr,
+using std::string, std::cin, std::unique_ptr, std::vector, std::unordered_map, std::cerr,
     std::format, std::make_unique;
 
 //===-------------
@@ -36,17 +36,21 @@ static double TokenNumVal;
 // filled in if UnknownChar
 static char TokenUnknownChar;
 
+static char getaschar() {
+  return static_cast<char>(cin.get());
+}
+
 static Token gettok() {
   static char LastChar{' '};
 
   // Skip any whitespace.
   while (isspace(LastChar))
-    LastChar = cin.get();
+    LastChar = getaschar();
 
   // identifier: a-zA-Z0-9
   if (isalpha(LastChar)) {
     TokenIdentifierStr = LastChar;
-    while (isalnum(LastChar = static_cast<char>(cin.get())))
+    while (isalnum(LastChar = getaschar()))
       TokenIdentifierStr += LastChar;
 
     if (TokenIdentifierStr == "def")
@@ -70,7 +74,7 @@ static Token gettok() {
   // comment until end of line
   if (LastChar == '#') {
     do
-      LastChar = cin.get();
+      LastChar = getaschar();
     while (LastChar != EOF && LastChar != '\n' && LastChar != '\r');
 
     if (LastChar != EOF)
@@ -83,7 +87,7 @@ static Token gettok() {
     return Token::EndOfFile;
 
   TokenUnknownChar = LastChar;
-  LastChar = cin.get();
+  LastChar = getaschar();
   return Token::UnknownChar;
 }
 
@@ -122,7 +126,7 @@ namespace {
 
   public:
     BinaryExprAst(const char Op, unique_ptr<ExprAST> LHS, unique_ptr<ExprAST> RHS)
-      : Op{Op}, LHS{move(LHS)}, RHS{move(RHS)} {
+      : Op{Op}, LHS{std::move(LHS)}, RHS{std::move(RHS)} {
     }
   };
 
@@ -133,7 +137,7 @@ namespace {
 
   public:
     CallExprAST(string Callee, vector<unique_ptr<ExprAST> > Args)
-      : Callee{std::move(Callee)}, Args{move(Args)} {
+      : Callee{std::move(Callee)}, Args{std::move(Args)} {
     }
   };
 
@@ -144,7 +148,7 @@ namespace {
 
   public:
     PrototypeAST(string Name, vector<string> args)
-      : Name{std::move(Name)}, args{move(args)} {
+      : Name{std::move(Name)}, args{std::move(args)} {
     }
 
     [[nodiscard]] const string &getName() const { return Name; }
@@ -157,7 +161,7 @@ namespace {
 
   public:
     FunctionAST(unique_ptr<PrototypeAST> Proto, unique_ptr<ExprAST> Body)
-      : Proto{move(Proto)}, Body{move(Body)} {
+      : Proto{std::move(Proto)}, Body{std::move(Body)} {
     }
   };
 }
@@ -205,7 +209,7 @@ static unique_ptr<ExprAST> ParseExpression();
 static unique_ptr<ExprAST> ParseNumberExpr() {
   auto Result{make_unique<NumberExprAst>(TokenNumVal)};
   getNextToken();
-  return move(Result);
+  return std::move(Result);
 }
 
 /// parenexpr ::= '(' expression ')'
@@ -239,7 +243,7 @@ static unique_ptr<ExprAST> ParseIdentifierExpr() {
   if (!CurUnknownCharIs(')')) {
     while (true) {
       if (auto Arg{ParseExpression()})
-        Args.push_back(move(Arg));
+        Args.push_back(std::move(Arg));
       else
         return nullptr;
 
@@ -254,7 +258,7 @@ static unique_ptr<ExprAST> ParseIdentifierExpr() {
 
   getNextToken(); // consume )
 
-  return make_unique<CallExprAST>(IdName, move(Args));
+  return make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
 /// primary
@@ -299,13 +303,13 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS) 
     // let the pending operater take RHS as its LHS
     const int NextPrec{GetTokPrecedence()};
     if (TokPrec < NextPrec) {
-      RHS = ParseBinOpRHS(TokPrec + 1, move(RHS));
+      RHS = ParseBinOpRHS(TokPrec + 1, std::move(RHS));
       if (!RHS)
         return nullptr;
     }
 
     // merge
-    LHS = make_unique<BinaryExprAst>(BinOp, move(LHS), move(RHS));
+    LHS = make_unique<BinaryExprAst>(BinOp, std::move(LHS), std::move(RHS));
   }
 }
 
@@ -316,7 +320,7 @@ static unique_ptr<ExprAST> ParseExpression() {
   if (!LHS)
     return nullptr;
 
-  return ParseBinOpRHS(0, move(LHS));
+  return ParseBinOpRHS(0, std::move(LHS));
 }
 
 /// prototype
@@ -338,7 +342,7 @@ static unique_ptr<PrototypeAST> ParsePrototype() {
 
   getNextToken(); // consume ')'
 
-  return make_unique<PrototypeAST>(Name, move(ArgsNames));
+  return make_unique<PrototypeAST>(Name, std::move(ArgsNames));
 }
 
 /// definition ::= 'def' prototype expression
@@ -349,7 +353,7 @@ static unique_ptr<FunctionAST> ParseDefinition() {
     return nullptr;
 
   if (auto E{ParseExpression()})
-    return make_unique<FunctionAST>(move(Proto), move(E));
+    return make_unique<FunctionAST>(std::move(Proto), std::move(E));
   return nullptr;
 }
 
@@ -358,7 +362,7 @@ static unique_ptr<FunctionAST> ParseTopLevelExpr() {
   if (auto E{ParseExpression()}) {
     // anonymous proto
     auto Proto{make_unique<PrototypeAST>("__anon_expr", vector<string>{})};
-    return make_unique<FunctionAST>(move(Proto), move(E));
+    return make_unique<FunctionAST>(std::move(Proto), std::move(E));
   }
   return nullptr;
 }
