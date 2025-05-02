@@ -36,7 +36,6 @@ static double TokenNumVal;
 // filled in if UnknownChar
 static char TokenUnknownChar;
 
-// TODO: are these the best functions to use in modern C++?
 static Token gettok() {
   static char LastChar{' '};
 
