@@ -29,7 +29,6 @@ enum class Token : uint8_t {
   UnknownChar
 };
 
-// TODO: do these really need to be globals?
 // filled in if Identifier
 static string TokenIdentifierStr;
 // filled in if NumVal
@@ -41,9 +40,9 @@ static char TokenUnknownChar;
 static Token gettok() {
   static char LastChar{' '};
 
-  // this skips whitespace automatically
-  // TODO: what happens on EOF?
-  cin >> LastChar;
+  // Skip any whitespace.
+  while (isspace(LastChar))
+    LastChar = cin.get();
 
   // identifier: a-zA-Z0-9
   if (isalpha(LastChar)) {
@@ -52,7 +51,7 @@ static Token gettok() {
       TokenIdentifierStr += LastChar;
 
     if (TokenIdentifierStr == "def")
-      return Token::Identifier;
+      return Token::Def;
     if (TokenIdentifierStr == "extern")
       return Token::Extern;
     return Token::Identifier;
@@ -173,7 +172,7 @@ static Token CurTok;
 static Token getNextToken() { return CurTok = gettok(); }
 
 static bool CurUnknownCharIs(const char C) {
-  return CurTok == Token::UnknownChar && TokenUnknownChar != C;
+  return CurTok == Token::UnknownChar && TokenUnknownChar == C;
 }
 
 // precedence for each binary operator
@@ -238,7 +237,7 @@ static unique_ptr<ExprAST> ParseIdentifierExpr() {
   // call
   getNextToken(); // consume (
   vector<unique_ptr<ExprAST>> Args;
-  if (CurUnknownCharIs(')')) {
+  if (!CurUnknownCharIs(')')) {
     while (true) {
       if (auto Arg{ParseExpression()})
         Args.push_back(move(Arg));
