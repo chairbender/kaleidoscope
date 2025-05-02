@@ -1,14 +1,15 @@
 // TODO: try import
+#include <cassert>
 #include <iostream>
 #include <utility>
 #include <vector>
-#include <map>
 #include <memory>
 #include <string>
 #include <cctype>
 #include <format>
+#include <unordered_map>
 
-using std::string, std::cin, std::move, std::unique_ptr, std::vector, std::map, std::cerr,
+using std::string, std::cin, std::move, std::unique_ptr, std::vector, std::unordered_map, std::cerr,
     std::format, std::make_unique;
 
 //===-------------
@@ -38,7 +39,7 @@ static char TokenUnknownChar;
 
 // TODO: are these the best functions to use in modern C++?
 static Token gettok() {
-  static int LastChar = ' ';
+  static char LastChar{' '};
 
   // this skips whitespace automatically
   // TODO: what happens on EOF?
@@ -46,9 +47,9 @@ static Token gettok() {
 
   // identifier: a-zA-Z0-9
   if (isalpha(LastChar)) {
-    TokenIdentifierStr = static_cast<char>(LastChar);
-    while (isalnum(LastChar = cin.get()))
-      TokenIdentifierStr += static_cast<char>(LastChar);
+    TokenIdentifierStr = LastChar;
+    while (isalnum(LastChar = static_cast<char>(cin.get())))
+      TokenIdentifierStr += LastChar;
 
     if (TokenIdentifierStr == "def")
       return Token::Identifier;
@@ -61,7 +62,7 @@ static Token gettok() {
   if (isdigit(LastChar) || LastChar == '.') {
     string NumStr;
     do {
-      NumStr += static_cast<char>(LastChar);
+      NumStr += LastChar;
       cin >> LastChar;
     } while (isdigit(LastChar) || LastChar == '.');
     TokenNumVal = stod(NumStr);
@@ -175,19 +176,23 @@ static bool CurUnknownCharIs(const char C) {
   return CurTok == Token::UnknownChar && TokenUnknownChar != C;
 }
 
-// TODO: this should just be statically initialized if possible
 // precedence for each binary operator
-static std::map<char, int> BinopPrecedence;
+static const std::unordered_map<char, int> BinopPrecedence = {
+  {'<', 10},
+  {'+', 20},
+  {'-', 20},
+  {'*', 40}
+};
 
 // get the precedence of the current binary operator token
 static int GetTokPrecedence() {
   if (CurTok != Token::UnknownChar)
     return -1;
 
-  const auto TokPrec = BinopPrecedence[TokenUnknownChar];
-  if (TokPrec <= 0)
+  const auto TokPrec{BinopPrecedence.find(TokenUnknownChar)};
+  if (TokPrec == BinopPrecedence.end())
     return -1;
-  return TokPrec;
+  return TokPrec->second;
 }
 
 template<typename T>
@@ -200,7 +205,7 @@ static unique_ptr<ExprAST> ParseExpression();
 
 /// numberexpr ::= number
 static unique_ptr<ExprAST> ParseNumberExpr() {
-  auto Result = make_unique<NumberExprAst>(TokenNumVal);
+  auto Result{make_unique<NumberExprAst>(TokenNumVal)};
   getNextToken();
   return move(Result);
 }
@@ -208,7 +213,7 @@ static unique_ptr<ExprAST> ParseNumberExpr() {
 /// parenexpr ::= '(' expression ')'
 static unique_ptr<ExprAST> ParseParenExpr() {
   getNextToken(); // consume (
-  auto V = ParseExpression();
+  auto V{ParseExpression()};
   if (!V)
     return nullptr;
 
@@ -222,7 +227,7 @@ static unique_ptr<ExprAST> ParseParenExpr() {
 ///   ::= identifier
 ///   ::= identifier '(' expression* ')'
 static unique_ptr<ExprAST> ParseIdentifierExpr() {
-  const auto IdName = TokenIdentifierStr;
+  const auto IdName{TokenIdentifierStr};
 
   getNextToken(); // consume identifier
 
@@ -232,10 +237,10 @@ static unique_ptr<ExprAST> ParseIdentifierExpr() {
 
   // call
   getNextToken(); // consume (
-  vector<unique_ptr<ExprAST> > Args;
+  vector<unique_ptr<ExprAST>> Args;
   if (CurUnknownCharIs(')')) {
     while (true) {
-      if (auto Arg = ParseExpression())
+      if (auto Arg{ParseExpression()})
         Args.push_back(move(Arg));
       else
         return nullptr;
@@ -277,24 +282,24 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS) 
 
   // if this is a binop, find its precedence
   while (true) {
-    const auto TokPrec = GetTokPrecedence();
+    const auto TokPrec{GetTokPrecedence()};
 
     // if it binds at least as tightly as the current binop,
     // consume it, otherwise we are done
     if (TokPrec < ExprPrec)
       return LHS;
 
-    static_assert(CurTok == Token::UnknownChar);
-    const auto BinOp = TokenUnknownChar;
+    assert(CurTok == Token::UnknownChar);
+    const auto BinOp{TokenUnknownChar};
     getNextToken();
 
-    auto RHS = ParsePrimary();
+    auto RHS{ParsePrimary()};
     if (!RHS)
       return nullptr;
 
     // if binop binds less tightly with RHS than the operator after RHS,
     // let the pending operater take RHS as its LHS
-    const int NextPrec = GetTokPrecedence();
+    const int NextPrec{GetTokPrecedence()};
     if (TokPrec < NextPrec) {
       RHS = ParseBinOpRHS(TokPrec + 1, move(RHS));
       if (!RHS)
@@ -309,7 +314,7 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS) 
 /// expression
 ///   ::= primary binoprhs
 static unique_ptr<ExprAST> ParseExpression() {
-  auto LHS = ParsePrimary();
+  auto LHS{ParsePrimary()};
   if (!LHS)
     return nullptr;
 
@@ -321,7 +326,7 @@ static unique_ptr<ExprAST> ParseExpression() {
 static unique_ptr<PrototypeAST> ParsePrototype() {
   if (CurTok != Token::Identifier)
     return LogError<PrototypeAST>("expected function name in prototype");
-  const auto Name = TokenIdentifierStr;
+  const auto Name{TokenIdentifierStr};
   getNextToken(); // consume name
 
   if (!CurUnknownCharIs('('))
@@ -341,20 +346,20 @@ static unique_ptr<PrototypeAST> ParsePrototype() {
 /// definition ::= 'def' prototype expression
 static unique_ptr<FunctionAST> ParseDefinition() {
   getNextToken(); // consume def
-  auto Proto = ParsePrototype();
+  auto Proto{ParsePrototype()};
   if (!Proto)
     return nullptr;
 
-  if (auto E = ParseExpression())
+  if (auto E{ParseExpression()})
     return make_unique<FunctionAST>(move(Proto), move(E));
   return nullptr;
 }
 
 /// toplevelexpr ::= expression
 static unique_ptr<FunctionAST> ParseTopLevelExpr() {
-  if (auto E = ParseExpression()) {
+  if (auto E{ParseExpression()}) {
     // anonymous proto
-    auto Proto = make_unique<PrototypeAST>("__anon_expr", vector<string>{});
+    auto Proto{make_unique<PrototypeAST>("__anon_expr", vector<string>{})};
     return make_unique<FunctionAST>(move(Proto), move(E));
   }
   return nullptr;
@@ -366,7 +371,69 @@ static unique_ptr<PrototypeAST> ParseExtern() {
   return ParsePrototype();
 }
 
+//===-------------
+// Top-level parsing
+//===-------------
+static void HandleDefinition() {
+  if (ParseDefinition()) {
+    cerr << "Parsed a function definition.\n";
+  } else {
+    // skip token for err recovery
+    getNextToken();
+  }
+}
+
+static void HandleExtern() {
+  if (auto Proto = ParseExtern()) {
+    cerr << "Parsed an extern declaration.\n";
+  } else {
+    // skip for err recovery
+    getNextToken();
+  }
+}
+
+static void HandleTopLevelExpression() {
+  // evaluate a top-level expr into an anon function
+  if (ParseTopLevelExpr()) {
+    cerr << "Parsed a top-level expression.\n";
+  } else {
+    // skip for err recovery
+    getNextToken();
+  }
+}
+
+/// top ::= definition | external | expression | ';'
+static void MainLoop() {
+  while (true) {
+    cerr << "ready> ";
+    switch (CurTok) {
+      case Token::EndOfFile:
+        return;
+      case Token::Def:
+        HandleDefinition();
+        break;
+      case Token::Extern:
+        HandleExtern();
+        break;
+      default:
+        // ignore top level semicolons
+        if (CurUnknownCharIs(';')) {
+          getNextToken();
+          break;
+        }
+        HandleTopLevelExpression();
+        break;
+    }
+  }
+}
+
 int main() {
-  std::cout << "Hello, World!" << std::endl;
+  // Prime the first token.
+  cerr << "ready> ";
+  getNextToken();
+
+  // Run the main "interpreter loop" now.
+  MainLoop();
+
   return 0;
 }
