@@ -8,7 +8,9 @@ cpp = meson.get_compiler('cpp')
 sources = [
   'src/main.cpp'
 ]
-deps = []
+deps = [
+  dependency('llvm', required: true)
+]
 cpp_args = ['-std=c++2c', '-Wall', '-Wextra', '-Wshadow', '-Wconversion', '-Wpedantic', '-Werror']
 link_args = []
 

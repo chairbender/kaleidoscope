@@ -1,4 +1,15 @@
 // TODO: try import
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
 #include <cassert>
 #include <iostream>
 #include <utility>
@@ -7,7 +18,10 @@
 #include <string>
 #include <cctype>
 #include <format>
+#include <map>
 #include <unordered_map>
+
+using namespace llvm;
 
 using std::string, std::cin, std::unique_ptr, std::vector, std::unordered_map, std::cerr,
     std::format, std::make_unique;
@@ -99,6 +113,9 @@ namespace {
   class ExprAST {
   public:
     virtual ~ExprAST() = default;
+    // note this is a raw pointer because it refers to something actually owned by TheModule
+    // TODO: this is what the tutorial says, but why not use a shared ptr instead?
+    virtual Value* codegen() = 0;
   };
 
   // numeric literals
@@ -106,8 +123,8 @@ namespace {
     const double Val;
 
   public:
-    NumberExprAst(const double Val) : Val{Val} {
-    }
+    NumberExprAst(const double Val) : Val{Val} {}
+    Value* codegen() override;
   };
 
   // variables
@@ -115,8 +132,8 @@ namespace {
     const string Name;
 
   public:
-    VariableExprAST(string Name) : Name{std::move(Name)} {
-    }
+    VariableExprAST(string Name) : Name{std::move(Name)} {}
+    Value* codegen() override;
   };
 
   // binary operators
@@ -126,8 +143,8 @@ namespace {
 
   public:
     BinaryExprAst(const char Op, unique_ptr<ExprAST> LHS, unique_ptr<ExprAST> RHS)
-      : Op{Op}, LHS{std::move(LHS)}, RHS{std::move(RHS)} {
-    }
+      : Op{Op}, LHS{std::move(LHS)}, RHS{std::move(RHS)} {}
+    Value* codegen() override;
   };
 
   // function calls
@@ -137,8 +154,8 @@ namespace {
 
   public:
     CallExprAST(string Callee, vector<unique_ptr<ExprAST> > Args)
-      : Callee{std::move(Callee)}, Args{std::move(Args)} {
-    }
+      : Callee{std::move(Callee)}, Args{std::move(Args)} {}
+    Value* codegen() override;
   };
 
   // function prototype
@@ -148,9 +165,8 @@ namespace {
 
   public:
     PrototypeAST(string Name, vector<string> args)
-      : Name{std::move(Name)}, args{std::move(args)} {
-    }
-
+      : Name{std::move(Name)}, args{std::move(args)} {}
+    Function *codegen();
     [[nodiscard]] const string &getName() const { return Name; }
   };
 
@@ -161,8 +177,8 @@ namespace {
 
   public:
     FunctionAST(unique_ptr<PrototypeAST> Proto, unique_ptr<ExprAST> Body)
-      : Proto{std::move(Proto)}, Body{std::move(Body)} {
-    }
+      : Proto{std::move(Proto)}, Body{std::move(Body)} {}
+    Function *codegen();
   };
 }
 
@@ -199,6 +215,11 @@ static int GetTokPrecedence() {
 
 template<typename T>
 unique_ptr<T> LogError(const string &Str) {
+  cerr << std::format("Error: {}\n", Str);
+  return nullptr;
+}
+
+Value* LogErrorV(const string &Str) {
   cerr << std::format("Error: {}\n", Str);
   return nullptr;
 }
@@ -374,7 +395,75 @@ static unique_ptr<PrototypeAST> ParseExtern() {
 }
 
 //===-------------
-// Top-level parsing
+// Code Generation
+//===-------------
+
+static unique_ptr<LLVMContext> TheContext;
+static unique_ptr<IRBuilder<>> Builder;
+static unique_ptr<Module> TheModule;
+static std::map<string, Value*> NamedValues;
+
+// todo: visitor pattern might be better instead of codegen-ing
+//  directly from the AST, but this is simpler for a tutorial
+
+Value* NumberExprAst::codegen() {
+  return ConstantFP::get(*TheContext, APFloat(Val));
+}
+
+Value* VariableExprAST::codegen() {
+  const auto V{NamedValues[Name]};
+  if (!V)
+    LogErrorV("Unknown variable name");
+  return V;
+}
+
+Value* BinaryExprAst::codegen() {
+  const auto L{LHS->codegen()};
+  const auto R{RHS->codegen()};
+  if (!L || !R)
+    return nullptr;
+
+  switch (Op) {
+    case '+':
+      return Builder->CreateFAdd(L, R, "addtmp");
+    case '-':
+      return Builder->CreateFSub(L, R, "subtmp");
+    case '*':
+      return Builder->CreateFMul(L, R, "multmp");
+    case '<':
+      const auto cmp = Builder->CreateFCmpULT(L, R, "cmptmp");
+      // convert bool 0/1 to double 0.0 or 1.0
+      return Builder->CreateUIToFP(cmp, Type::getDoubleTy(*TheContext), "booltmp");
+    default:
+      return LogErrorV("invalid binary operator");
+  }
+}
+
+Value* CallExprAST::codegen() {
+  const auto CalleeF{TheModule->getFunction(Callee)};
+  if (!CalleeF)
+    return LogErrorV("Unknown function referenced");
+
+  // if argument mismatch error
+  if (CalleeF->arg_size() != Args.size())
+    return LogErrorV("Incorrect # arguments passed");
+
+  vector<Value*> ArgsV;
+  for (const auto& arg : Args) {
+    ArgsV.push_back(arg->codegen());
+    if (!ArgsV.back())
+      return nullptr;
+  }
+
+  return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
+
+
+
+
+//===-------------
+// Top-level parsing and JIT Driver
 //===-------------
 static void HandleDefinition() {
   if (ParseDefinition()) {
