@@ -1,6 +1,6 @@
 project(
   'kaleidoscope',
-  ['cpp'],
+  ['c', 'cpp'],
   meson_version : '>=1.7'
 )
 
