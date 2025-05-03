@@ -5,6 +5,21 @@ own compiler: https://llvm.org/docs/tutorial/index.html
 However, on top of this tutorial, I'm trying to practice using the most up-to-date modern C++26 standards and best practices (at least those supported
 by Clang 20) and best practices, whereas the Kaleidoscope tutorial is rather old (but still super helpful for me!).
 
+# Building on Windows
+Install msys2 and use only the clang-based environment and clang-based toolchain.
+
+Use the newest version of clang (20 ATTOW) and install
+the necessary dependencies:
+
+TODO: Below might be out of date - missing llvm dev dependencies?
+```shell
+# in CLANG terminal (NOT ucrt64)
+pacman -S --needed base-devel \
+mingw-w64-clang-x86_64-toolchain
+pacman -S \
+mingw-w64-clang-x86_64-meson 
+```
+
 # Building on Linux
 We want to use clang (figure that makes the most sense since this is an LLVM-based project)
 and the most modern C++ version possible (C++2c).
