@@ -486,12 +486,12 @@ Function* FunctionAST::codegen() {
     else {
       // confirm declaration matches signature
       const auto ProtoArgs{Proto->getArgs()};
-      if (F->getNumOperands() != ProtoArgs.size()) {
+      if (F->arg_size() != ProtoArgs.size()) {
         LogErrorV(format("Function {} has previous declaration with {} args but new declaration has {} args",
-          Proto->getName(), F->getNumOperands(), ProtoArgs.size()));
+          Proto->getName(), F->arg_size(), ProtoArgs.size()));
         return nullptr;
       }
-      for (unsigned i = 0, e = F->getNumOperands(); i != e; ++i) {
+      for (unsigned i = 0; i < F->arg_size(); ++i) {
         if (F->getArg(i)->getName() != ProtoArgs[i]) {
           LogErrorV(format("Function {} has previous declaration with arg {} named {} but new declaration has arg {} named {}",
             Proto->getName(), i, F->getArg(i)->getName(), i, ProtoArgs[i]));
