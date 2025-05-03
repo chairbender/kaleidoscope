@@ -479,7 +479,7 @@ Function* PrototypeAST::codegen() const {
 Function* FunctionAST::codegen() {
   // check for existing function from a previous extern declaration
   // If we don't find it, we'll codegen it.
-  const auto TheFunction = [&]() -> Function* {
+  const auto TheFunction = [this]() -> Function* {
     auto F{TheModule->getFunction(Proto->getName())};
     if (!F)
       F = Proto->codegen();
