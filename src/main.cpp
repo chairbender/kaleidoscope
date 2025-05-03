@@ -161,13 +161,14 @@ namespace {
   // function prototype
   class PrototypeAST {
     const string Name;
-    const vector<string> args;
+    const vector<string> Args;
 
   public:
-    PrototypeAST(string Name, vector<string> args)
-      : Name{std::move(Name)}, args{std::move(args)} {}
-    Function *codegen();
+    PrototypeAST(string Name, vector<string> Args)
+      : Name{std::move(Name)}, Args{std::move(Args)} {}
+    [[nodiscard]] Function *codegen() const;
     [[nodiscard]] const string &getName() const { return Name; }
+    [[nodiscard]] const vector<string> &getArgs() const { return Args; }
   };
 
   // function definition
@@ -401,6 +402,8 @@ static unique_ptr<PrototypeAST> ParseExtern() {
 static unique_ptr<LLVMContext> TheContext;
 static unique_ptr<IRBuilder<>> Builder;
 static unique_ptr<Module> TheModule;
+// holds named values which are in current scope.
+// this is NOT a map of ALL the named values in the program.
 static std::map<string, Value*> NamedValues;
 
 // todo: visitor pattern might be better instead of codegen-ing
@@ -430,10 +433,11 @@ Value* BinaryExprAst::codegen() {
       return Builder->CreateFSub(L, R, "subtmp");
     case '*':
       return Builder->CreateFMul(L, R, "multmp");
-    case '<':
+    case '<': {
       const auto cmp = Builder->CreateFCmpULT(L, R, "cmptmp");
       // convert bool 0/1 to double 0.0 or 1.0
       return Builder->CreateUIToFP(cmp, Type::getDoubleTy(*TheContext), "booltmp");
+    }
     default:
       return LogErrorV("invalid binary operator");
   }
@@ -459,15 +463,86 @@ Value* CallExprAST::codegen() {
 }
 
 
+Function* PrototypeAST::codegen() const {
+  const vector Doubles{Args.size(), Type::getDoubleTy(*TheContext)};
+  const auto FT{FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false)};
+  const auto F{Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get())};
+  // note: not strictly necessary - we can let llvm generate the names for us,
+  // but helps with readability of the IR
+  unsigned Idx = 0;
+  for (auto& Arg : F->args())
+    Arg.setName(Args[Idx++]);
 
+  return F;
+}
 
+Function* FunctionAST::codegen() {
+  // check for existing function from a previous extern declaration
+  // If we don't find it, we'll codegen it.
+  const auto TheFunction = [&]() -> Function* {
+    auto F{TheModule->getFunction(Proto->getName())};
+    if (!F)
+      F = Proto->codegen();
+    else {
+      // confirm declaration matches signature
+      const auto ProtoArgs{Proto->getArgs()};
+      if (F->getNumOperands() != ProtoArgs.size()) {
+        LogErrorV(format("Function {} has previous declaration with {} args but new declaration has {} args",
+          Proto->getName(), F->getNumOperands(), ProtoArgs.size()));
+        return nullptr;
+      }
+      for (unsigned i = 0, e = F->getNumOperands(); i != e; ++i) {
+        if (F->getArg(i)->getName() != ProtoArgs[i]) {
+          LogErrorV(format("Function {} has previous declaration with arg {} named {} but new declaration has arg {} named {}",
+            Proto->getName(), i, F->getArg(i)->getName(), i, ProtoArgs[i]));
+          return nullptr;
+        }
+      }
+    }
+    return F;
+  }();
+
+  //create a new BB to start insertion into
+  const auto BB{BasicBlock::Create(*TheContext, "entry", TheFunction)};
+  Builder->SetInsertPoint(BB);
+
+  // record function args in the NamedValues map
+  // so we can reference them later in this same scope
+  NamedValues.clear();
+  for (auto& Arg : TheFunction->args())
+    NamedValues[string{Arg.getName()}] = &Arg;
+
+  if (const auto RetVal{Body->codegen()}) {
+      // finish off the function
+      Builder->CreateRet(RetVal);
+
+      // ask LLVM to check for consistency
+      verifyFunction(*TheFunction);
+
+      return TheFunction;
+  }
+
+  // error reading body, remove function
+  TheFunction->eraseFromParent();
+  return nullptr;
+}
 
 //===-------------
 // Top-level parsing and JIT Driver
 //===-------------
+static void InitializeModule() {
+  TheContext = make_unique<LLVMContext>();
+  TheModule = make_unique<Module>("my cool jit", *TheContext);
+  Builder = make_unique<IRBuilder<>>(*TheContext);
+}
+
 static void HandleDefinition() {
-  if (ParseDefinition()) {
-    cerr << "Parsed a function definition.\n";
+  if (const auto FnAST = ParseDefinition()) {
+    if (const auto FnIR = FnAST->codegen()) {
+      cerr << "Read function definition:\n";
+      FnIR->print(errs());
+      cerr << "\n\n";
+    }
   } else {
     // skip token for err recovery
     getNextToken();
@@ -475,8 +550,12 @@ static void HandleDefinition() {
 }
 
 static void HandleExtern() {
-  if (auto Proto = ParseExtern()) {
-    cerr << "Parsed an extern declaration.\n";
+  if (const auto Proto = ParseExtern()) {
+    if (const auto FnIR = Proto->codegen()) {
+      cerr << "Read extern:\n";
+      FnIR->print(errs());
+      cerr << "\n\n";
+    }
   } else {
     // skip for err recovery
     getNextToken();
@@ -485,8 +564,14 @@ static void HandleExtern() {
 
 static void HandleTopLevelExpression() {
   // evaluate a top-level expr into an anon function
-  if (ParseTopLevelExpr()) {
-    cerr << "Parsed a top-level expression.\n";
+  if (const auto FnAST = ParseTopLevelExpr()) {
+    if (const auto FnIR = FnAST->codegen()) {
+      cerr << "Read top-level expression:\n";
+      FnIR->print(errs());
+      cerr << "\n\n";
+
+      FnIR->eraseFromParent();
+    }
   } else {
     // skip for err recovery
     getNextToken();
@@ -523,8 +608,12 @@ int main() {
   cerr << "ready> ";
   getNextToken();
 
+  InitializeModule();
+
   // Run the main "interpreter loop" now.
   MainLoop();
+
+  TheModule->print(errs(), nullptr);
 
   return 0;
 }
