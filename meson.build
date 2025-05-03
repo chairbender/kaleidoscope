@@ -9,7 +9,7 @@ sources = [
   'src/main.cpp'
 ]
 deps = [
-  dependency('llvm', required: true)
+  dependency('llvm', required: true, include_type: 'system')
 ]
 cpp_args = ['-std=c++2c', '-Wall', '-Wextra', '-Wshadow', '-Wconversion', '-Wpedantic', '-Werror']
 link_args = []
