@@ -1,4 +1,5 @@
 // TODO: try import
+#include "KaleidoscopeJIT.hpp"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -8,8 +9,18 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/Reassociate.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include <cassert>
 #include <iostream>
 #include <utility>
@@ -405,6 +416,31 @@ static unique_ptr<Module> TheModule;
 // holds named values which are in current scope.
 // this is NOT a map of ALL the named values in the program.
 static std::map<string, Value*> NamedValues;
+static unique_ptr<orc::KaleidoscopeJIT> TheJIT;
+static unique_ptr<FunctionPassManager> TheFPM;
+static unique_ptr<LoopAnalysisManager> TheLAM;
+static unique_ptr<FunctionAnalysisManager> TheFAM;
+static unique_ptr<CGSCCAnalysisManager> TheCGAM;
+static unique_ptr<ModuleAnalysisManager> TheMAM;
+static unique_ptr<PassInstrumentationCallbacks> ThePIC;
+static unique_ptr<StandardInstrumentations> TheSI;
+static std::map<string, unique_ptr<PrototypeAST>> FunctionProtos;
+static ExitOnError ExitOnErr;
+
+Function* getFunction(const string &Name) {
+  // see if function has already been added to the module
+  if (auto* F{TheModule->getFunction(Name)})
+    return F;
+
+  // If not, check whether we can codegen the declaration
+  // from the prototype
+  auto FI{FunctionProtos.find(Name)};
+  if (FI != FunctionProtos.end())
+    return FI->second->codegen();
+
+  return nullptr;
+}
+
 
 // todo: visitor pattern might be better instead of codegen-ing
 //  directly from the AST, but this is simpler for a tutorial
@@ -444,7 +480,7 @@ Value* BinaryExprAst::codegen() {
 }
 
 Value* CallExprAST::codegen() {
-  const auto CalleeF{TheModule->getFunction(Callee)};
+  const auto CalleeF{getFunction(Callee)};
   if (!CalleeF)
     return LogErrorV("Unknown function referenced");
 
@@ -477,30 +513,13 @@ Function* PrototypeAST::codegen() const {
 }
 
 Function* FunctionAST::codegen() {
-  // check for existing function from a previous extern declaration
-  // If we don't find it, we'll codegen it.
-  const auto TheFunction = [this]() -> Function* {
-    auto F{TheModule->getFunction(Proto->getName())};
-    if (!F)
-      F = Proto->codegen();
-    else {
-      // confirm declaration matches signature
-      const auto ProtoArgs{Proto->getArgs()};
-      if (F->arg_size() != ProtoArgs.size()) {
-        LogErrorV(format("Function {} has previous declaration with {} args but new declaration has {} args",
-          Proto->getName(), F->arg_size(), ProtoArgs.size()));
-        return nullptr;
-      }
-      for (unsigned i = 0; i < F->arg_size(); ++i) {
-        if (F->getArg(i)->getName() != ProtoArgs[i]) {
-          LogErrorV(format("Function {} has previous declaration with arg {} named {} but new declaration has arg {} named {}",
-            Proto->getName(), i, F->getArg(i)->getName(), i, ProtoArgs[i]));
-          return nullptr;
-        }
-      }
-    }
-    return F;
-  }();
+  // transfer ownership of the prototype to the functionprotos map,
+  // but keep a reference to it for use below
+  auto& P{*Proto};
+  FunctionProtos[Proto->getName()] = std::move(Proto);
+  Function* TheFunction = getFunction(Proto->getName());
+  if (!TheFunction)
+    return nullptr;
 
   //create a new BB to start insertion into
   const auto BB{BasicBlock::Create(*TheContext, "entry", TheFunction)};
@@ -519,6 +538,9 @@ Function* FunctionAST::codegen() {
       // ask LLVM to check for consistency
       verifyFunction(*TheFunction);
 
+      // Run the optimizer on it (in place)
+      TheFPM->run(*TheFunction, *TheFAM);
+
       return TheFunction;
   }
 
@@ -530,10 +552,42 @@ Function* FunctionAST::codegen() {
 //===-------------
 // Top-level parsing and JIT Driver
 //===-------------
-static void InitializeModule() {
+static void InitializeModuleAndManagers() {
+  // open a new context and module
   TheContext = make_unique<LLVMContext>();
   TheModule = make_unique<Module>("my cool jit", *TheContext);
+  TheModule->setDataLayout(TheJIT->getDataLayout());
+
   Builder = make_unique<IRBuilder<>>(*TheContext);
+
+  // create new transform and analysis pass managers
+  TheFPM = make_unique<FunctionPassManager>();
+  TheLAM = make_unique<LoopAnalysisManager>();
+  TheFAM = make_unique<FunctionAnalysisManager>();
+  TheCGAM = make_unique<CGSCCAnalysisManager>();
+  TheMAM = make_unique<ModuleAnalysisManager>();
+  ThePIC = make_unique<PassInstrumentationCallbacks>();
+  TheSI = make_unique<StandardInstrumentations>(*TheContext, true);
+
+  TheSI->registerCallbacks(*ThePIC, TheMAM.get());
+
+  // add transform passes
+  // simple peephole / bit-twiddling optzns
+  TheFPM->addPass(InstCombinePass());
+  // reassociate expressions
+  TheFPM->addPass(ReassociatePass());
+  // eliminate common subexpressions
+  TheFPM->addPass(GVNPass());
+  // simplify the control flow graph (deleting unreachable blocks, etc)
+  TheFPM->addPass(SimplifyCFGPass());
+
+
+  // register analysis passes used in these transform passes
+  PassBuilder PB;
+  PB.registerModuleAnalyses(*TheMAM);
+  PB.registerFunctionAnalyses(*TheFAM);
+  // basically seems like it makes all the managers "aware" of each other.
+  PB.crossRegisterProxies(*TheLAM, *TheFAM, *TheCGAM, *TheMAM);
 }
 
 static void HandleDefinition() {
@@ -542,6 +596,10 @@ static void HandleDefinition() {
       cerr << "Read function definition:\n";
       FnIR->print(errs());
       cerr << "\n\n";
+      ExitOnErr(TheJIT->addModule(
+        orc::ThreadSafeModule(std::move(TheModule),
+          std::move(TheContext))));
+      InitializeModuleAndManagers();
     }
   } else {
     // skip token for err recovery
@@ -550,11 +608,12 @@ static void HandleDefinition() {
 }
 
 static void HandleExtern() {
-  if (const auto Proto = ParseExtern()) {
-    if (const auto FnIR = Proto->codegen()) {
+  if (auto ProtoAST = ParseExtern()) {
+    if (const auto FnIR = ProtoAST->codegen()) {
       cerr << "Read extern:\n";
       FnIR->print(errs());
       cerr << "\n\n";
+      FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
     }
   } else {
     // skip for err recovery
@@ -565,12 +624,30 @@ static void HandleExtern() {
 static void HandleTopLevelExpression() {
   // evaluate a top-level expr into an anon function
   if (const auto FnAST = ParseTopLevelExpr()) {
-    if (const auto FnIR = FnAST->codegen()) {
-      cerr << "Read top-level expression:\n";
-      FnIR->print(errs());
-      cerr << "\n\n";
+    if (FnAST->codegen()) {
+      // Track the JIT'd memory allocated to our anonymous
+      // expression so we can free it after execution
+      auto RT{TheJIT->getMainJITDylib().createResourceTracker()};
 
-      FnIR->eraseFromParent();
+      auto TSM{orc::ThreadSafeModule(std::move(TheModule), std::move(TheContext))};
+      ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
+      InitializeModuleAndManagers();
+
+      // search JIT for the anon expr symbol
+      const auto ExprSymbol{ExitOnErr(TheJIT->lookup("__anon_expr"))};
+      // TODO: doesn't compile with below - out of date tutorial?
+      //assert(ExprSymbol && "Function not found");
+
+      // get symbol's addres and cast it to the right type
+      // (takes no args, returns a double) so we can call it
+      // as a function
+      double (*FP)() = ExprSymbol.getAddress().toPtr<double (*)()>();
+      // note we can now call our jit compiled code directly
+      // as if it was a normal function
+      cerr << std::format("Evaluated expression to {}\n", FP());
+
+      // delete the anon expression module from the JIT.
+      ExitOnErr(RT->remove());
     }
   } else {
     // skip for err recovery
@@ -604,11 +681,15 @@ static void MainLoop() {
 }
 
 int main() {
+  InitializeNativeTarget();
+  InitializeNativeTargetAsmPrinter();
+  InitializeNativeTargetAsmParser();
+
   // Prime the first token.
   cerr << "ready> ";
   getNextToken();
 
-  InitializeModule();
+  TheJIT = make_unique<orc::KaleidoscopeJIT>();
 
   // Run the main "interpreter loop" now.
   MainLoop();
