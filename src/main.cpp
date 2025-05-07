@@ -51,7 +51,10 @@ enum class Token : uint8_t {
   // of negative values = known tokens and positive = unknown char.
   // For readability / expressing intent better, I'm trying out this approach instead of actually
   // handling an unknown char as yet another token type.
-  UnknownChar
+  UnknownChar,
+  If,
+  Then,
+  Else
 };
 
 // filled in if Identifier
@@ -82,6 +85,12 @@ static Token gettok() {
       return Token::Def;
     if (TokenIdentifierStr == "extern")
       return Token::Extern;
+    if (TokenIdentifierStr == "if")
+      return Token::If;
+    if (TokenIdentifierStr == "then")
+      return Token::Then;
+    if (TokenIdentifierStr == "else")
+      return Token::Else;
     return Token::Identifier;
   }
 
@@ -166,6 +175,15 @@ namespace {
   public:
     CallExprAST(string Callee, vector<unique_ptr<ExprAST> > Args)
       : Callee{std::move(Callee)}, Args{std::move(Args)} {}
+    Value* codegen() override;
+  };
+
+  // if/then/else
+  class IfExprAST : public ExprAST {
+    const unique_ptr<ExprAST> Cond, Then, Else;
+  public:
+    IfExprAST(unique_ptr<ExprAST> Cond, unique_ptr<ExprAST> Then, unique_ptr<ExprAST> Else)
+      : Cond{std::move(Cond)}, Then{std::move(Then)}, Else{std::move(Else)} {}
     Value* codegen() override;
   };
 
@@ -293,6 +311,34 @@ static unique_ptr<ExprAST> ParseIdentifierExpr() {
   return make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+/// ifexpr ::= 'if' expression 'then' expression 'else' expression
+static unique_ptr<ExprAST> ParseIfExpr() {
+  getNextToken(); // consume if
+
+  // condition
+  auto Cond = ParseExpression();
+  if (!Cond)
+    return nullptr;
+
+  if (CurTok != Token::Then)
+    return LogError<ExprAST>("expected then");
+  getNextToken(); // consume then
+
+  auto Then = ParseExpression();
+  if (!Then)
+    return nullptr;
+
+  if (CurTok != Token::Else)
+    return LogError<ExprAST>("expected else");
+  getNextToken(); // consume else
+
+  auto Else = ParseExpression();
+  if (!Else)
+    return nullptr;
+
+  return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
+}
+
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
@@ -307,6 +353,8 @@ static unique_ptr<ExprAST> ParsePrimary() {
       return ParseIdentifierExpr();
     case Token::Number:
       return ParseNumberExpr();
+    case Token::If:
+      return ParseIfExpr();
   }
 }
 
@@ -497,6 +545,57 @@ Value* CallExprAST::codegen() {
   return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
+Value* IfExprAST::codegen() {
+  auto CondV{Cond->codegen()};
+  if (!CondV)
+    return nullptr;
+
+  // convert condition to a bool by comparing neq to 0.0
+  CondV = Builder->CreateFCmpONE(
+    CondV, ConstantFP::get(*TheContext, APFloat(0.0)), "ifcond");
+
+  const auto TheFunction{Builder->GetInsertBlock()->getParent()};
+
+  // create blocks for the then and else cases. Insert then block at the end of the function
+  auto ThenBB{BasicBlock::Create(*TheContext, "then", TheFunction)};
+  auto ElseBB{BasicBlock::Create(*TheContext, "else")};
+  const auto MergeBB{BasicBlock::Create(*TheContext, "ifcont")};
+
+  Builder->CreateCondBr(CondV, ThenBB, ElseBB);
+
+  // emit then block
+  Builder->SetInsertPoint(ThenBB);
+  const auto ThenV{Then->codegen()};
+  if (!ThenV)
+    return nullptr;
+
+  Builder->CreateBr(MergeBB);
+  // because codegen of "then" can change the current block (for example for nested if/then), update ThenBB for the PHI
+  // so it points at the possibly new block
+  ThenBB = Builder->GetInsertBlock();
+
+  // emit else block
+  TheFunction->insert(TheFunction->end(), ElseBB);
+  Builder->SetInsertPoint(ElseBB);
+
+  const auto ElseV{Else->codegen()};
+  if (!ElseV)
+    return nullptr;
+
+  Builder->CreateBr(MergeBB);
+  // because codegen of "else" can change the current block (for example for nested if/then), update ElseBB for the PHI
+  // so it points at the possibly new block
+  ElseBB = Builder->GetInsertBlock();
+
+  // emit merge block
+  TheFunction->insert(TheFunction->end(), MergeBB);
+  Builder->SetInsertPoint(MergeBB);
+  auto PN{Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp")};
+
+  PN->addIncoming(ThenV, ThenBB);
+  PN->addIncoming(ElseV, ElseBB);
+  return PN;
+}
 
 Function* PrototypeAST::codegen() const {
   const vector Doubles{Args.size(), Type::getDoubleTy(*TheContext)};
