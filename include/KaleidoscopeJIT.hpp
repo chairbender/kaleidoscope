@@ -13,7 +13,10 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_KALEIDOSCOPEJIT_H
 #define LLVM_EXECUTIONENGINE_ORC_KALEIDOSCOPEJIT_H
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include "llvm/ADT/StringRef.h"
+#pragma clang diagnostic pop
 #include "llvm/ExecutionEngine/JITSymbol.h"
 #include "llvm/ExecutionEngine/Orc/CompileUtils.h"
 #include "llvm/ExecutionEngine/Orc/Core.h"

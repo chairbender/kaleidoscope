@@ -179,12 +179,11 @@ namespace {
       : Name{std::move(Name)}, Args{std::move(Args)} {}
     [[nodiscard]] Function *codegen() const;
     [[nodiscard]] const string &getName() const { return Name; }
-    [[nodiscard]] const vector<string> &getArgs() const { return Args; }
   };
 
   // function definition
   class FunctionAST {
-    const unique_ptr<PrototypeAST> Proto;
+    unique_ptr<PrototypeAST> Proto;
     const unique_ptr<ExprAST> Body;
 
   public:
@@ -515,9 +514,9 @@ Function* PrototypeAST::codegen() const {
 Function* FunctionAST::codegen() {
   // transfer ownership of the prototype to the functionprotos map,
   // but keep a reference to it for use below
-  auto& P{*Proto};
+  const auto name = Proto->getName();
   FunctionProtos[Proto->getName()] = std::move(Proto);
-  Function* TheFunction = getFunction(Proto->getName());
+  Function* TheFunction = getFunction(name);
   if (!TheFunction)
     return nullptr;
 
@@ -689,12 +688,12 @@ int main() {
   cerr << "ready> ";
   getNextToken();
 
-  TheJIT = make_unique<orc::KaleidoscopeJIT>();
+  TheJIT = ExitOnErr(orc::KaleidoscopeJIT::Create());
+
+  InitializeModuleAndManagers();
 
   // Run the main "interpreter loop" now.
   MainLoop();
-
-  TheModule->print(errs(), nullptr);
 
   return 0;
 }
