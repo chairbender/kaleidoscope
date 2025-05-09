@@ -54,7 +54,9 @@ enum class Token : uint8_t {
   UnknownChar,
   If,
   Then,
-  Else
+  Else,
+  For,
+  In
 };
 
 // filled in if Identifier
@@ -91,6 +93,10 @@ static Token gettok() {
       return Token::Then;
     if (TokenIdentifierStr == "else")
       return Token::Else;
+    if (TokenIdentifierStr == "for")
+      return Token::For;
+    if (TokenIdentifierStr == "in")
+      return Token::In;
     return Token::Identifier;
   }
 
@@ -184,6 +190,19 @@ namespace {
   public:
     IfExprAST(unique_ptr<ExprAST> Cond, unique_ptr<ExprAST> Then, unique_ptr<ExprAST> Else)
       : Cond{std::move(Cond)}, Then{std::move(Then)}, Else{std::move(Else)} {}
+    Value* codegen() override;
+  };
+
+  // for
+  class ForExprAST : public ExprAST {
+    const string VarName;
+    const unique_ptr<ExprAST> Start, End, Step;
+    const unique_ptr<ExprAST> Body;
+  public:
+    ForExprAST(string VarName, unique_ptr<ExprAST> Start, unique_ptr<ExprAST> End, unique_ptr<ExprAST> Step, unique_ptr<ExprAST> Body)
+      : VarName{std::move(VarName)}, Start{std::move(Start)}, End{std::move(End)},
+    Step{std::move(Step)}, Body{std::move(Body)} {}
+
     Value* codegen() override;
   };
 
@@ -339,6 +358,51 @@ static unique_ptr<ExprAST> ParseIfExpr() {
   return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
 }
 
+/// forexpr ::= 'for' identifire '=' expr ',' expr (',' expr)? 'in' expression
+static unique_ptr<ExprAST> ParseForExpr() {
+  getNextToken(); // consume for
+
+  if (CurTok != Token::Identifier)
+    return LogError<ExprAST>("expected identifier in for loop");
+
+  auto VarName{TokenIdentifierStr};
+  getNextToken(); // consume identifier
+
+  if (!CurUnknownCharIs('='))
+    return LogError<ExprAST>("expected '=' after for loop variable");
+  getNextToken(); // consume =
+
+  auto Start{ParseExpression()};
+  if (!Start)
+    return nullptr;
+  if (!CurUnknownCharIs(','))
+    return LogError<ExprAST>("expected ',' after for loop start");
+  getNextToken(); // consume ,
+
+  auto End{ParseExpression()};
+  if (!End)
+    return nullptr;
+
+  // optional step value
+  unique_ptr<ExprAST> Step;
+  if (CurUnknownCharIs(',')) {
+    getNextToken(); // consume ,
+    Step = ParseExpression();
+    if (!Step)
+      return nullptr;
+  }
+
+  if (CurTok != Token::In)
+    return LogError<ExprAST>("expected 'in' after for loop");
+  getNextToken(); // consume in
+
+  auto Body{ParseExpression()};
+  if (!Body)
+    return nullptr;
+
+  return make_unique<ForExprAST>(VarName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
+}
+
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
@@ -355,6 +419,8 @@ static unique_ptr<ExprAST> ParsePrimary() {
       return ParseNumberExpr();
     case Token::If:
       return ParseIfExpr();
+    case Token::For:
+      return ParseForExpr();
   }
 }
 
@@ -597,6 +663,84 @@ Value* IfExprAST::codegen() {
   return PN;
 }
 
+Value *ForExprAST::codegen() {
+  // emit start code first, without variable in scope
+  const auto StartValue{Start->codegen()};
+  if (!StartValue)
+    return nullptr;
+
+  // Make new basic block for the loop header, inserting after current block
+  const auto TheFunction{Builder->GetInsertBlock()->getParent()};
+  const auto PreheaderBB{Builder->GetInsertBlock()};
+  const auto LoopBB{BasicBlock::Create(*TheContext, "loop", TheFunction)};
+
+  // insert explicit fallthrough from current block to the LoopBB (for the upcoming phi)
+  Builder->CreateBr(LoopBB);
+
+  // Start insertion in LoopBB
+  Builder->SetInsertPoint(LoopBB);
+
+  // Start the PHI node with an entry for Start.
+  // We haven't generated the loop body yet so we'll have to wait to add that to the phi
+  const auto Variable{Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, VarName)};
+  Variable->addIncoming(StartValue, PreheaderBB);
+
+  // within the loop, the variable is defined equal to the phi node.
+  // If it shadows an existing var, we hae to restore it, so save it now.
+  const auto OldVal{NamedValues[VarName]};
+  NamedValues[VarName] = Variable;
+
+  // Emit the body of the loop. This, like any other expr, can change the
+  // current BB.
+  // Note that we ignore the value computed by the body, but don't allow an error.
+  if (!Body->codegen())
+    return nullptr;
+
+  // emit the step value
+  Value* StepValue = nullptr;
+  if (Step) {
+    StepValue = Step->codegen();
+    if (!StepValue)
+      return nullptr;
+  } else {
+    // if no step value, use 1.0
+    StepValue = ConstantFP::get(*TheContext, APFloat(1.0));
+  }
+
+  const auto NextVar{Builder->CreateFAdd(Variable, StepValue, "nextvar")};
+
+  // compute end condition
+  auto EndCond{End->codegen()};
+  if (!EndCond)
+    return nullptr;
+
+  // convert condition to a bool by comparing neq 0.0
+  EndCond = Builder->CreateFCmpONE(
+    EndCond, ConstantFP::get(*TheContext, APFloat(0.0)), "loopcond");
+
+  // create the "after loop" block and insert it
+  const auto LoopEndBB{Builder->GetInsertBlock()};
+  const auto AfterBB{BasicBlock::Create(*TheContext, "afterloop", TheFunction)};
+
+  // insert conditional branch into end of LoopEndBB
+  Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
+
+  // any new code will be inserted in AfterBB
+  Builder->SetInsertPoint(AfterBB);
+
+  // add a new entry to the phi node for the backedge
+  Variable->addIncoming(NextVar, LoopEndBB);
+
+  //restore unshadowed var
+  if (OldVal)
+    NamedValues[VarName] = OldVal;
+  else
+    NamedValues.erase(VarName);
+
+  // for expr always returns 0.0
+  return Constant::getNullValue(Type::getDoubleTy(*TheContext));
+}
+
 Function* PrototypeAST::codegen() const {
   const vector Doubles{Args.size(), Type::getDoubleTy(*TheContext)};
   const auto FT{FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false)};
@@ -778,6 +922,31 @@ static void MainLoop() {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+  fputc((char)X, stderr);
+  return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+  fprintf(stderr, "%f\n", X);
+  return 0;
+}
+
+//===
+// Main Driver code
+//===
 int main() {
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
