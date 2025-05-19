@@ -21,6 +21,7 @@
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Utils/Mem2Reg.h"
 #include <cassert>
 #include <iostream>
 #include <utility>
@@ -528,7 +529,7 @@ static unique_ptr<IRBuilder<>> Builder;
 static unique_ptr<Module> TheModule;
 // holds named values which are in current scope.
 // this is NOT a map of ALL the named values in the program.
-static std::map<string, Value*> NamedValues;
+static std::map<string, AllocaInst*> NamedValues;
 static unique_ptr<orc::KaleidoscopeJIT> TheJIT;
 static unique_ptr<FunctionPassManager> TheFPM;
 static unique_ptr<LoopAnalysisManager> TheLAM;
@@ -554,6 +555,12 @@ Function* getFunction(const string &Name) {
   return nullptr;
 }
 
+static AllocaInst* CreateEntryBlockAlloca(Function* TheFunction,
+     StringRef VarName) {
+  IRBuilder<> TmpB(&TheFunction->getEntryBlock(), TheFunction->getEntryBlock().begin());
+  return TmpB.CreateAlloca(Type::getDoubleTy(*TheContext), nullptr, VarName);
+}
+
 
 // todo: visitor pattern might be better instead of codegen-ing
 //  directly from the AST, but this is simpler for a tutorial
@@ -565,8 +572,8 @@ Value* NumberExprAst::codegen() {
 Value* VariableExprAST::codegen() {
   const auto V{NamedValues[Name]};
   if (!V)
-    LogErrorV("Unknown variable name");
-  return V;
+    return LogErrorV("Unknown variable name");
+  return Builder->CreateLoad(V->getAllocatedType(), V, Name.c_str());
 }
 
 Value* BinaryExprAst::codegen() {
@@ -664,14 +671,20 @@ Value* IfExprAST::codegen() {
 }
 
 Value *ForExprAST::codegen() {
-  // emit start code first, without variable in scope
+  const auto TheFunction{Builder->GetInsertBlock()->getParent()};
+
+  // create an alloca for the var in the entry block
+  const auto Alloca{CreateEntryBlockAlloca(TheFunction, VarName)};
+
+  // emit the start code first, without var in scope
   const auto StartValue{Start->codegen()};
   if (!StartValue)
     return nullptr;
 
+  // store the value into the alloca
+  Builder->CreateStore(StartValue, Alloca);
+
   // Make new basic block for the loop header, inserting after current block
-  const auto TheFunction{Builder->GetInsertBlock()->getParent()};
-  const auto PreheaderBB{Builder->GetInsertBlock()};
   const auto LoopBB{BasicBlock::Create(*TheContext, "loop", TheFunction)};
 
   // insert explicit fallthrough from current block to the LoopBB (for the upcoming phi)
@@ -680,15 +693,10 @@ Value *ForExprAST::codegen() {
   // Start insertion in LoopBB
   Builder->SetInsertPoint(LoopBB);
 
-  // Start the PHI node with an entry for Start.
-  // We haven't generated the loop body yet so we'll have to wait to add that to the phi
-  const auto Variable{Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, VarName)};
-  Variable->addIncoming(StartValue, PreheaderBB);
-
   // within the loop, the variable is defined equal to the phi node.
   // If it shadows an existing var, we hae to restore it, so save it now.
   const auto OldVal{NamedValues[VarName]};
-  NamedValues[VarName] = Variable;
+  NamedValues[VarName] = Alloca;
 
   // Emit the body of the loop. This, like any other expr, can change the
   // current BB.
@@ -707,12 +715,16 @@ Value *ForExprAST::codegen() {
     StepValue = ConstantFP::get(*TheContext, APFloat(1.0));
   }
 
-  const auto NextVar{Builder->CreateFAdd(Variable, StepValue, "nextvar")};
-
   // compute end condition
   auto EndCond{End->codegen()};
   if (!EndCond)
     return nullptr;
+
+  // reload, increment, and restore the alloca. This handles the case where
+  // the body of the loop mutates the var
+  const auto CurVar{Builder->CreateLoad(Alloca->getAllocatedType(), Alloca, VarName.c_str())};
+  const auto NextVar{Builder->CreateFAdd(CurVar, StepValue, "nextvar")};
+  Builder->CreateStore(NextVar, Alloca);
 
   // convert condition to a bool by comparing neq 0.0
   EndCond = Builder->CreateFCmpONE(
@@ -727,9 +739,6 @@ Value *ForExprAST::codegen() {
 
   // any new code will be inserted in AfterBB
   Builder->SetInsertPoint(AfterBB);
-
-  // add a new entry to the phi node for the backedge
-  Variable->addIncoming(NextVar, LoopEndBB);
 
   //restore unshadowed var
   if (OldVal)
@@ -770,8 +779,16 @@ Function* FunctionAST::codegen() {
   // record function args in the NamedValues map
   // so we can reference them later in this same scope
   NamedValues.clear();
-  for (auto& Arg : TheFunction->args())
-    NamedValues[string{Arg.getName()}] = &Arg;
+  for (auto& Arg : TheFunction->args()) {
+    // create an alloca for this var
+    const auto Alloca{CreateEntryBlockAlloca(TheFunction, Arg.getName())};
+
+    // store initial value into the alloca
+    Builder->CreateStore(&Arg, Alloca);
+
+    // add args to the variable symbol table
+    NamedValues[std::string{Arg.getName()}] = Alloca;
+  }
 
   if (const auto RetVal{Body->codegen()}) {
       // finish off the function
@@ -814,6 +831,8 @@ static void InitializeModuleAndManagers() {
   TheSI->registerCallbacks(*ThePIC, TheMAM.get());
 
   // add transform passes
+  // promote allocas to registers
+  TheFPM->addPass(PromotePass());
   // simple peephole / bit-twiddling optzns
   TheFPM->addPass(InstCombinePass());
   // reassociate expressions
